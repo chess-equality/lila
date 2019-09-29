@@ -54,7 +54,7 @@ lazy val modules = Seq(
   playban, insight, perfStat, slack, quote, challenge,
   study, studySearch, fishnet, explorer, learn, plan,
   event, coach, practice, evalCache, irwin,
-  activity, relay, streamer, bot
+  activity, relay, streamer, bot, blockchain
 )
 
 lazy val moduleRefs = modules map projectToRef
@@ -387,4 +387,8 @@ lazy val socket = module("socket", Seq(common, hub, memo, tree)).settings(
 
 lazy val hub = module("hub", Seq(common)).settings(
   libraryDependencies ++= Seq(scaffeine) ++ provided(play.api)
+)
+
+lazy val blockchain = module("blockchain", Seq(common)).settings(
+  libraryDependencies ++= provided(play.api)
 )
