@@ -1,11 +1,10 @@
 package lila.user
 
 import scala.concurrent.duration._
-
-import lila.common.{ LightUser, EmailAddress, NormalizedEmailAddress }
-
+import lila.common.{ EmailAddress, LightUser, NormalizedEmailAddress }
 import lila.rating.PerfType
 import org.joda.time.DateTime
+import waves.WavesWallet
 
 case class User(
     id: String,
@@ -29,7 +28,8 @@ case class User(
     plan: Plan,
     reportban: Boolean = false,
     rankban: Boolean = false,
-    totpSecret: Option[TotpSecret] = None
+    totpSecret: Option[TotpSecret] = None,
+    wavesWallet: WavesWallet
 ) extends Ordered[User] {
 
   override def equals(other: Any) = other match {
@@ -237,9 +237,10 @@ object User {
     val salt = "salt"
     val bpass = "bpass"
     val sha512 = "sha512"
-    val totpSecret = "totp"
+    var totpSecret = "totp"
     val watchList = "watchList"
     val changedCase = "changedCase"
+    val wavesWallet = "wavesWallet"
   }
 
   import lila.db.BSON
@@ -255,6 +256,7 @@ object User {
     private implicit def perfsHandler = Perfs.perfsBSONHandler
     private implicit def planHandler = Plan.planBSONHandler
     private implicit def totpSecretHandler = TotpSecret.totpSecretBSONHandler
+    private implicit def wavesWalletHandler = WavesWallet.wavesWalletBSONHandler
 
     def reads(r: BSON.Reader): User = User(
       id = r str id,
@@ -278,7 +280,8 @@ object User {
       plan = r.getO[Plan](plan) | Plan.empty,
       reportban = r boolD reportban,
       rankban = r boolD rankban,
-      totpSecret = r.getO[TotpSecret](totpSecret)
+      totpSecret = r.getO[TotpSecret](totpSecret),
+      wavesWallet = r.get[WavesWallet](wavesWallet)
     )
 
     def writes(w: BSON.Writer, o: User) = BSONDocument(
@@ -303,7 +306,8 @@ object User {
       plan -> o.plan.nonEmpty,
       reportban -> w.boolO(o.reportban),
       rankban -> w.boolO(o.rankban),
-      totpSecret -> o.totpSecret
+      totpSecret -> o.totpSecret,
+      wavesWallet -> o.wavesWallet
     )
   }
 

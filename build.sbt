@@ -33,7 +33,8 @@ libraryDependencies ++= Seq(
   reactivemongo.driver, reactivemongo.iteratees, akka.actor, akka.slf4j,
   maxmind, prismic, netty, guava, markdown,
   kamon.core, kamon.influxdb, scalatags,
-  java8compat, semver, scrimage, scalaConfigs, scaffeine, lettuce, epoll
+  java8compat, semver, scrimage, scalaConfigs, scaffeine, lettuce, epoll,
+  wavesj
 )
 resourceDirectory in Assets := (sourceDirectory in Compile).value / "assets"
 unmanagedResourceDirectories in Assets ++= (if (scala.sys.env.get("SERVE_ASSETS").exists(_ == "1")) Seq(baseDirectory.value / "public") else Nil)
@@ -157,10 +158,11 @@ lazy val mod = module("mod", Seq(common, db, user, hub, security, tournament, si
   libraryDependencies ++= provided(play.api, play.test, reactivemongo.driver)
 )
 
-lazy val user = module("user", Seq(common, memo, db, hub, rating)).settings(
+lazy val user = module("user", Seq(common, memo, db, hub, rating, blockchain)).settings(
   libraryDependencies ++= provided(play.api, play.test, reactivemongo.driver, hasher,
-    reactivemongo.iteratees // only for bcrypt migration
-    )
+    reactivemongo.iteratees, // only for bcrypt migration
+    wavesj
+  )
 )
 
 lazy val game = module("game", Seq(common, memo, db, hub, user, chat)).settings(
@@ -390,5 +392,5 @@ lazy val hub = module("hub", Seq(common)).settings(
 )
 
 lazy val blockchain = module("blockchain", Seq(common)).settings(
-  libraryDependencies ++= provided(play.api)
+  libraryDependencies ++= provided(play.api, wavesj)
 )

@@ -235,4 +235,5 @@ object Env {
   def bot = lila.bot.Env.current
   def evalCache = lila.evalCache.Env.current
   def rating = lila.rating.Env.current
+  def blockchain = lila.blockchain.Env.current
 }

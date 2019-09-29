@@ -46,6 +46,7 @@ object Dependencies {
   val lettuce = "io.lettuce" % "lettuce-core" % "5.1.8.RELEASE"
   val epoll = "io.netty" % "netty-transport-native-epoll" % "4.1.39.Final" classifier "linux-x86_64"
   val markdown = "com.vladsch.flexmark" % "flexmark-all" % "0.50.30"
+  val wavesj = "com.wavesplatform" % "wavesj" % "0.15.3"
 
   object reactivemongo {
     val version = "0.12.4"

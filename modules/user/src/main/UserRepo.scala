@@ -9,6 +9,8 @@ import lila.common.{ ApiVersion, EmailAddress, NormalizedEmailAddress }
 import lila.db.BSON.BSONJodaDateTimeHandler
 import lila.db.dsl._
 import lila.rating.{ Perf, PerfType }
+import lila.blockchain.waves.WavesService
+import lila.user.waves.WavesWallet
 
 object UserRepo {
 
@@ -268,7 +270,12 @@ object UserRepo {
   ): Fu[Option[User]] =
     !nameExists(username) flatMap {
       _ ?? {
-        val doc = newUser(username, passwordHash, email, blind, mobileApiVersion, mustConfirmEmail) ++
+        val wavesWallet = WavesService.createWallet
+        val wallet = WavesWallet.make(
+          address = wavesWallet.address,
+          seed = wavesWallet.seed
+        )
+        val doc = newUser(username, passwordHash, email, blind, mobileApiVersion, mustConfirmEmail, wallet) ++
           ("len" -> BSONInteger(username.size))
         coll.insert(doc) >> named(normalize(username))
       }
@@ -539,11 +546,13 @@ object UserRepo {
     email: EmailAddress,
     blind: Boolean,
     mobileApiVersion: Option[ApiVersion],
-    mustConfirmEmail: Boolean
+    mustConfirmEmail: Boolean,
+    wavesWallet: WavesWallet
   ) = {
 
     implicit def countHandler = Count.countBSONHandler
     implicit def perfsHandler = Perfs.perfsBSONHandler
+    implicit def wavesWalletHandler = WavesWallet.wavesWalletBSONHandler
     import lila.db.BSON.BSONJodaDateTimeHandler
 
     val normalizedEmail = email.normalize
@@ -559,7 +568,8 @@ object UserRepo {
       F.createdAt -> DateTime.now,
       F.createdWithApiVersion -> mobileApiVersion.map(_.value),
       F.seenAt -> DateTime.now,
-      F.playTime -> User.PlayTime(0, 0)
+      F.playTime -> User.PlayTime(0, 0),
+      F.wavesWallet -> wavesWallet
     ) ++ {
         (email.value != normalizedEmail.value) ?? $doc(F.verbatimEmail -> email)
       } ++ {
