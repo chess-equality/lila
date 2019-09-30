@@ -8,6 +8,7 @@ import lila.app.templating.Environment._
 import lila.app.ui.ScalatagsTemplate._
 import lila.common.String.html.richText
 import lila.user.User
+import lila.blockchain.waves.WavesService
 
 import controllers.routes
 
@@ -212,6 +213,14 @@ It's useful against spambots. These marks are not visible to the public."""
                 p(
                   "Waves seed: ",
                   frag(br, wavesWallet.seed)
+                ),
+                p(
+                  "Waves balance: ",
+                  frag(
+                    strong(WavesService.getBalance(wavesWallet.address)),
+                    br, s"Asset balance (${WavesService.asset.getName}): ",
+                    strong(WavesService.getAssetBalance(wavesWallet.address))
+                  )
                 )
               )
             ),

@@ -25,21 +25,20 @@ final class Env(
   val fee = WavesFee
   val starterAmount = WavesStarterAmount
 
-  def getMasterKeyAccount(): PrivateKeyAccount = {
-    PrivateKeyAccount.fromSeed(WavesMasterSeed, 0, getNodeType)
-  }
-
-  def getNode(): Node = {
-    val nodeType = getNodeType
-    new Node(WavesNodeUrl, nodeType)
-  }
-
-  def getNodeType(): Byte = {
+  val nodeType: Byte = {
     if (WavesNodeNetwork.toLowerCase == Mainnet) {
       Account.MAINNET
     } else {
       Account.TESTNET
     }
+  }
+
+  val node: Node = {
+    new Node(WavesNodeUrl, nodeType)
+  }
+
+  val masterKeyAccount: PrivateKeyAccount = {
+    PrivateKeyAccount.fromSeed(WavesMasterSeed, 0, nodeType)
   }
 }
 
