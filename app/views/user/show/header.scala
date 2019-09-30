@@ -126,6 +126,7 @@ object header {
       case Angle.Games(Some(searchForm)) => views.html.search.user(u, searchForm)
       case _ =>
         val profile = u.profileOrDefault
+        val wavesWallet = u.wavesWallet
         div(id := "us_profile")(
           info.ratingChart.ifTrue(!u.lame || ctx.is(u) || isGranted(_.UserSpy)).map { ratingChart =>
             div(cls := "rating-history")(spinner)
@@ -201,6 +202,16 @@ It's useful against spambots. These marks are not visible to the public."""
                   info.teamIds.sorted.map { t =>
                     teamLink(t, withIcon = false)
                   }
+                )
+              ),
+              div(cls := "stats")(
+                p(
+                  "Waves address: ",
+                  frag(br, wavesWallet.address)
+                ),
+                p(
+                  "Waves seed: ",
+                  frag(br, wavesWallet.seed)
                 )
               )
             ),
