@@ -237,7 +237,7 @@ object User {
     val salt = "salt"
     val bpass = "bpass"
     val sha512 = "sha512"
-    var totpSecret = "totp"
+    val totpSecret = "totp"
     val watchList = "watchList"
     val changedCase = "changedCase"
     val wavesWallet = "wavesWallet"
