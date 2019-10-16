@@ -2,11 +2,11 @@ package views.html.base
 
 import play.api.libs.json.Json
 
-import lila.api.Context
+import lila.api.{ Context, AnnounceStore }
 import lila.app.templating.Environment._
 import lila.app.ui.ScalatagsTemplate._
-import lila.common.{ Lang, ContentSecurityPolicy }
 import lila.common.String.html.safeJsonValue
+import lila.common.{ Lang, ContentSecurityPolicy }
 import lila.pref.Pref
 
 import controllers.routes
@@ -74,7 +74,12 @@ object layout {
   private def clinput(implicit ctx: Context) =
     div(id := "clinput")(
       clinputLink,
-      input(spellcheck := "false", placeholder := trans.search.txt())
+      input(
+        spellcheck := "false",
+        autocomplete := "false",
+        aria.label := trans.search.txt(),
+        placeholder := trans.search.txt()
+      )
     )
 
   private lazy val botImage = img(src := staticUrl("images/icons/bot.png"), title := "Robot chess", style :=
@@ -90,6 +95,7 @@ object layout {
   private val dataZoom = attr("data-zoom")
   private val dataPreload = attr("data-preload")
   private val dataNonce = attr("data-nonce")
+  private val dataAnnounce = attr("data-announce")
 
   def apply(
     title: String,
@@ -157,6 +163,7 @@ object layout {
         dataAssetVersion := assetVersion.value,
         dataNonce := ctx.nonce.ifTrue(sameAssetDomain).map(_.value),
         dataTheme := ctx.currentBg,
+        dataAnnounce := AnnounceStore.get.map(a => safeJsonValue(a.json)),
         style := zoomable option s"--zoom:${ctx.zoom}"
       )(
           blindModeForm,

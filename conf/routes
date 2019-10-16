@@ -214,6 +214,9 @@ GET   /tournament                             controllers.Tournament.home(page: 
 GET   /tournament/featured                    controllers.Tournament.featured
 GET   /tournament/new                         controllers.Tournament.form
 POST  /tournament/new                         controllers.Tournament.create
+GET   /tournament/team-battle/new/:teamId     controllers.Tournament.teamBattleForm(teamId: String)
+GET   /tournament/team-battle/edit/:id        controllers.Tournament.teamBattleEdit(id: String)
+POST  /tournament/team-battle/edit/:id        controllers.Tournament.teamBattleUpdate(id: String)
 GET   /tournament/calendar                    controllers.Tournament.calendar
 GET   /tournament/$id<\w{8}>                  controllers.Tournament.show(id: String)
 GET   /tournament/$id<\w{8}>/standing/:page   controllers.Tournament.standing(id: String, page: Int)
@@ -222,6 +225,7 @@ GET   /tournament/$id<\w{8}>/socket/v:apiVersion controllers.Tournament.websocke
 POST  /tournament/$id<\w{8}>/join             controllers.Tournament.join(id: String)
 POST  /tournament/$id<\w{8}>/withdraw         controllers.Tournament.pause(id: String)
 GET   /tournament/$id<\w{8}>/player/:user     controllers.Tournament.player(id: String, user: String)
+GET   /tournament/$id<\w{8}>/team/:team       controllers.Tournament.teamInfo(id: String, team: String)
 POST  /tournament/$id<\w{8}>/terminate        controllers.Tournament.terminate(id: String)
 GET   /tournament/help                        controllers.Tournament.help(system: Option[String] ?= None)
 GET   /tournament/limited-invitation          controllers.Tournament.limitedInvitation
@@ -243,7 +247,6 @@ GET   /simul/new                              controllers.Simul.form
 POST  /simul/new                              controllers.Simul.create
 GET   /simul/reload                           controllers.Simul.homeReload
 GET   /simul/$id<\w{8}>                       controllers.Simul.show(id: String)
-GET   /simul/$id<\w{8}>/socket/v:apiVersion   controllers.Simul.websocket(id: String, apiVersion: Int)
 POST  /simul/$id<\w{8}>/accept/:user          controllers.Simul.accept(id: String, user: String)
 POST  /simul/$id<\w{8}>/reject/:user          controllers.Simul.reject(id: String, user: String)
 POST  /simul/$id<\w{8}>/start                 controllers.Simul.start(id: String)
@@ -260,6 +263,7 @@ GET   /team/me                                controllers.Team.mine
 GET   /team/all                               controllers.Team.all(page: Int ?= 1)
 GET   /team/requests                          controllers.Team.requests
 GET   /team/search                            controllers.Team.search(text: String ?= "", page: Int ?= 1)
+GET   /team/autocomplete                      controllers.Team.autocomplete
 GET   /team/:id                               controllers.Team.show(id: String, page: Int ?= 1)
 POST  /team/:id/join                          controllers.Team.join(id: String)
 POST  /team/:id/quit                          controllers.Team.quit(id: String)
@@ -382,8 +386,8 @@ GET   /mod/public-chat                 controllers.Mod.publicChat
 GET   /mod/email-confirm               controllers.Mod.emailConfirm
 GET   /mod/chat-panic                  controllers.Mod.chatPanic
 POST  /mod/chat-panic                  controllers.Mod.chatPanicPost
-GET   /mod/print/*fh                   controllers.Mod.print(fh: String)
-POST  /mod/print/ban/:v/*fh            controllers.Mod.printBan(v: Boolean, fh: String)
+GET   /mod/print/:fh                   controllers.Mod.print(fh: String)
+POST  /mod/print/ban/:v/:fh            controllers.Mod.printBan(v: Boolean, fh: String)
 GET   /api/stream/mod                  controllers.Mod.eventStream
 
 # Irwin
@@ -465,6 +469,7 @@ GET    /stat/rating/distribution/:perf controllers.Stat.ratingDistribution(perf:
 GET   /api                             controllers.Api.index
 POST  /api/users                       controllers.Api.usersByIds
 GET   /api/user/puzzle-activity        controllers.Puzzle.activity
+GET   /api/user/:name/tournament/created controllers.Api.tournamentsByOwner(name: String)
 GET   /api/user/:name                  controllers.Api.user(name: String)
 GET   /api/user/:name/activity         controllers.Api.activity(name: String)
 GET   /api/user/:name/following        controllers.Relation.apiFollowing(name: String)
