@@ -15,10 +15,9 @@ import lila.user.User
 final class RelayApi(
     repo: RelayRepo,
     studyApi: StudyApi,
-    socketMap: lila.study.SocketMap,
     withStudy: RelayWithStudy,
     jsonView: JsonView,
-    clearFormatCache: Url => Unit,
+    clearFormatCache: Relay.Sync.UpstreamWithRound => Unit,
     system: ActorSystem
 ) {
 
@@ -68,7 +67,7 @@ final class RelayApi(
   }
 
   def requestPlay(id: Relay.Id, v: Boolean): Funit = WithRelay(id) { relay =>
-    clearFormatCache(Url parse relay.sync.upstream.url)
+    clearFormatCache(relay.sync.upstream.withRound)
     update(relay) { r =>
       if (v) r.withSync(_.play) else r.withSync(_.pause)
     } void
@@ -87,6 +86,10 @@ final class RelayApi(
       }
     } inject relay
   }
+
+  def reset(relay: Relay, by: User): Funit =
+    studyApi.deleteAllChapters(relay.studyId, by) >>
+      requestPlay(relay.id, true)
 
   def getOngoing(id: Relay.Id): Fu[Option[Relay]] =
     repo.coll.find($doc("_id" -> id, "finished" -> false)).uno[Relay]
@@ -139,7 +142,4 @@ final class RelayApi(
         system.lilaBus.publish(SendTos(userIds, payload), 'socketUsers)
       }
     }
-
-  private[relay] def getNbViewers(relay: Relay): Fu[Int] =
-    socketMap.askIfPresentOrZero[Int](relay.id.value)(lila.socket.SocketTrouper.GetNbMembers)
 }

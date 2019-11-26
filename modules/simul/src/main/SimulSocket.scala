@@ -1,70 +1,61 @@
 package lila.simul
 
-import akka.actor._
+import akka.actor.ActorSelection
 import play.api.libs.json._
+import scala.concurrent.duration._
 
-import lila.chat.Chat
+import actorApi._
+import lila.game.{ Game, Pov }
+import lila.room.RoomSocket.{ Protocol => RP, _ }
 import lila.socket.RemoteSocket.{ Protocol => P, _ }
 import lila.socket.Socket.makeMessage
-import lila.user.User
 
 private final class SimulSocket(
+    getSimul: Simul.ID => Fu[Option[Simul]],
+    jsonView: JsonView,
     remoteSocketApi: lila.socket.RemoteSocket,
     chat: ActorSelection,
-    system: ActorSystem
+    bus: lila.common.Bus
 ) {
 
-  import SimulSocket._
+  def hostIsOn(simulId: Simul.ID, gameId: Game.ID): Unit =
+    rooms.tell(simulId, NotifyVersion("hostGame", gameId))
 
-  private val handler: Handler = {
-    case Protocol.In.ChatSay(simulId, userId, msg) =>
-      val chatId = Chat.Id(simulId)
-      val publicSource = lila.hub.actorApi.shutup.PublicSource.Simul(simulId).some
-      chat ! lila.chat.actorApi.UserTalk(chatId, userId, msg, publicSource)
-    case tell @ P.In.TellSri(sri, user, typ, msg) if messagesHandled(typ) =>
-    // lila.mon.socket.remote.lobby.tellSri(typ)
-    // getOrConnect(sri, user) foreach { member =>
-    //   controller(member).applyOrElse(typ -> msg, {
-    //     case _ => logger.warn(s"Can't handle $typ")
-    //   }: lila.socket.Handler.Controller)
-    // }
-  }
+  def reload(simulId: Simul.ID): Unit =
+    getSimul(simulId) foreach {
+      _ foreach { simul =>
+        jsonView(simul, none) foreach { obj =>
+          rooms.tell(simulId, NotifyVersion("reload", obj))
+        }
+      }
+    }
 
-  private val messagesHandled: Set[String] =
-    Set()
+  def aborted(simulId: Simul.ID): Unit =
+    rooms.tell(simulId, NotifyVersion("aborted", Json.obj()))
 
-  private val inReader: P.In.Reader = raw => Protocol.In.reader(raw) orElse P.In.baseReader(raw)
+  def startSimul(simul: Simul, firstGame: Game): Unit =
+    firstGame.playerByUserId(simul.hostId) foreach { player =>
+      redirectPlayer(simul, Pov(firstGame, player))
+    }
 
-  remoteSocketApi.subscribe("simul-in", inReader)(handler orElse remoteSocketApi.baseHandler)
+  def startGame(simul: Simul, game: Game): Unit =
+    game.playerByUserId(simul.hostId) foreach { opponent =>
+      redirectPlayer(simul, Pov(game, !opponent.color))
+    }
+
+  private def redirectPlayer(simul: Simul, pov: Pov): Unit =
+    pov.player.userId foreach { userId =>
+      send(RP.Out.tellRoomUser(RoomId(simul.id), userId, makeMessage("redirect", pov.fullId)))
+    }
+
+  lazy val rooms = makeRoomMap(send, bus.some)
+
+  private lazy val handler: Handler = roomHandler(rooms, chat, logger,
+    roomId => _.Simul(roomId.value).some)
 
   private lazy val send: String => Unit = remoteSocketApi.makeSender("simul-out").apply _
 
-  system.lilaBus.subscribeFun('remoteSocketChat) {
-    case lila.chat.actorApi.ChatLine(chatId, line) =>
-      send(Protocol.Out.chatLine(chatId, lila.chat.JsonView(line)))
-    case a => println(s"remote socket chat unhandled $a")
-  }
-}
-
-private object SimulSocket {
-
-  type SriStr = String
-
-  object Protocol {
-    object Out {
-      def chatLine(chatId: Chat.Id, payload: JsObject) =
-        s"chat/line $chatId ${Json stringify payload}"
-    }
-    object In {
-      case class ChatSay(simulId: Simul.ID, userId: User.ID, msg: String) extends P.In
-
-      val reader: P.In.Reader = raw => raw.path match {
-        case "chat/say" => raw.args.split(" ", 3) match {
-          case Array(simulId, userId, msg) => ChatSay(simulId, userId, msg).some
-          case _ => none
-        }
-        case _ => none
-      }
-    }
-  }
+  remoteSocketApi.subscribe("simul-in", RP.In.reader)(
+    handler orElse remoteSocketApi.baseHandler
+  ) >>- send(P.Out.boot)
 }

@@ -5,7 +5,6 @@ import com.typesafe.config.Config
 import scala.concurrent.duration._
 
 import lila.game.Game
-import lila.hub.TrouperMap
 import lila.socket.Socket.{ SocketVersion, GetVersion }
 import lila.user.User
 
@@ -21,42 +20,19 @@ final class Env(
     asyncCache: lila.memo.AsyncCache.Builder,
     getPref: User => Fu[lila.pref.Pref],
     getRelation: (User, User) => Fu[Option[lila.relation.Relation]],
+    remoteSocketApi: lila.socket.RemoteSocket,
     scheduler: lila.common.Scheduler
 ) {
 
   private val settings = new {
     val CollectionChallenge = config getString "collection.challenge"
     val MaxPerUser = config getInt "max_per_user"
-    val HistoryMessageTtl = config duration "history.message.ttl"
-    val SriTimeout = config duration "sri.timeout"
-    val SocketTimeout = config duration "socket.timeout"
     val MaxPlaying = config getInt "max_playing"
   }
   import settings._
 
-  private val socketMap: SocketMap = lila.socket.SocketMap[ChallengeSocket](
-    system = system,
-    mkTrouper = (challengeId: String) => new ChallengeSocket(
-      system = system,
-      challengeId = challengeId,
-      history = new lila.socket.History(ttl = HistoryMessageTtl),
-      getChallenge = repo.byId,
-      sriTtl = SriTimeout,
-      keepMeAlive = () => socketMap touch challengeId
-    ),
-    accessTimeout = SocketTimeout,
-    monitoringName = "challenge.socketMap",
-    broomFrequency = 3677 millis
-  )
-
   def version(challengeId: Challenge.ID): Fu[SocketVersion] =
-    socketMap.askIfPresentOrZero[SocketVersion](challengeId)(GetVersion)
-
-  lazy val socketHandler = new SocketHandler(
-    hub = hub,
-    socketMap = socketMap,
-    pingChallenge = api.ping
-  )
+    socket.rooms.ask[SocketVersion](challengeId)(GetVersion)
 
   lazy val api = new ChallengeApi(
     repo = repo,
@@ -64,9 +40,13 @@ final class Env(
     jsonView = jsonView,
     gameCache = gameCache,
     maxPlaying = MaxPlaying,
-    socketMap = socketMap,
     asyncCache = asyncCache,
     lilaBus = system.lilaBus
+  )
+
+  private lazy val socket = new ChallengeSocket(
+    api = api,
+    remoteSocketApi = remoteSocketApi
   )
 
   lazy val granter = new ChallengeGranter(
@@ -100,6 +80,7 @@ object Env {
     asyncCache = lila.memo.Env.current.asyncCache,
     getPref = lila.pref.Env.current.api.getPref,
     getRelation = lila.relation.Env.current.api.fetchRelation,
+    remoteSocketApi = lila.socket.Env.current.remoteSocket,
     scheduler = lila.common.PlayApp.scheduler
   )
 }

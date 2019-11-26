@@ -14,10 +14,8 @@ import lila.common.LightUser
 import lila.game.actorApi.{ StartGame, UserStartGame }
 import lila.game.{ Game, Event }
 import lila.hub.actorApi.Deploy
-import lila.hub.actorApi.game.ChangeFeatured
-import lila.hub.actorApi.round.{ IsOnGame, TourStanding }
+import lila.hub.actorApi.round.{ IsOnGame, TourStandingOld }
 import lila.hub.actorApi.simul.GetHostIds
-import lila.hub.actorApi.tv.{ Select => TvSelect }
 import lila.hub.Trouper
 import lila.socket._
 import lila.socket.actorApi.{ Connected => _, _ }
@@ -33,6 +31,7 @@ private[round] final class RoundSocket(
     getGoneWeights: Game => Fu[(Float, Float)]
 ) extends SocketTrouper[Member](dependencies.system, dependencies.sriTtl) {
 
+  import RoundSocket._
   import dependencies._
 
   private var hasAi = false
@@ -207,9 +206,7 @@ private[round] final class RoundSocket(
 
       val initialMsgs = events.fold(
         SocketTrouper.resyncMessage.some
-      ) {
-          batchMsgs(member, _)
-        } map { m => Enumerator(m: JsValue) }
+      ) { batchMsgs(member, _) } map { m => Enumerator(m: JsValue) }
 
       val fullEnumerator = lila.common.Iteratee.prependFu(
         reloadTvEvent.map(_.toList),
@@ -219,7 +216,7 @@ private[round] final class RoundSocket(
       promise success Connected(fullEnumerator, member)
     }
 
-    case eventList: EventList => notify(eventList.events)
+    case EventList(events) => notify(events)
 
     case lila.chat.actorApi.ChatLine(chatId, line) => notify(List(line match {
       case l: lila.chat.UserLine => Event.UserMessage(l, chatId == chatIds.pub)
@@ -227,9 +224,8 @@ private[round] final class RoundSocket(
     }))
 
     case a: lila.analyse.actorApi.AnalysisProgress =>
-      import lila.analyse.{ JsonView => analysisJson }
       notifyAll("analysisProgress", Json.obj(
-        "analysis" -> analysisJson.bothPlayers(a.game, a.analysis),
+        "analysis" -> lila.analyse.JsonView.bothPlayers(a.game, a.analysis),
         "tree" -> TreeBuilder(
           id = a.analysis.id,
           pgnMoves = a.game.pgnMoves,
@@ -240,10 +236,6 @@ private[round] final class RoundSocket(
           clocks = none
         )
       ))
-
-    case ChangeFeatured(_, msg) => foreachWatcher(_ push msg)
-
-    case TvSelect(msg) => foreachWatcher(_ push msg)
 
     case UserStartGame(userId, game) => foreachWatcher { m =>
       if (m.onUserTv(userId) && !m.userId.exists(game.userIds.contains))
@@ -261,7 +253,7 @@ private[round] final class RoundSocket(
         notifyAll(event.typ, event.data)
       }
 
-    case TourStanding(json) => notifyOwners("tourStanding", json)
+    case TourStandingOld(json) => notifyOwners("tourStanding", json)
 
   }: Trouper.Receive) orElse lila.chat.Socket.out(
     send = (t, d, _) => notifyAll(t, d)
@@ -337,28 +329,24 @@ private[round] final class RoundSocket(
 
 object RoundSocket {
 
+  val ragequitTimeout = 10.seconds
+  val disconnectTimeout = 120.seconds
+
+  def gameDisconnectTimeout(speed: Option[Speed]): FiniteDuration =
+    disconnectTimeout * speed.fold(1) {
+      case Speed.Classical => 3
+      case Speed.Rapid => 2
+      case _ => 1
+    }
+
   case class ChatIds(priv: Chat.Id, pub: Chat.Id) {
     def all = Seq(priv, pub)
-    def update(g: Game) =
-      g.tournamentId.map { id => copy(priv = Chat.Id(id)) } orElse
-        g.simulId.map { id => copy(priv = Chat.Id(id)) } getOrElse
-        this
   }
 
   private[round] case class Dependencies(
       system: ActorSystem,
       lightUser: LightUser.Getter,
       sriTtl: FiniteDuration,
-      disconnectTimeout: FiniteDuration,
-      ragequitTimeout: FiniteDuration,
       getGame: Game.ID => Fu[Option[Game]]
-  ) {
-
-    def gameDisconnectTimeout(speed: Option[Speed]): FiniteDuration =
-      disconnectTimeout * speed.fold(1) {
-        case Speed.Classical => 3
-        case Speed.Rapid => 2
-        case _ => 1
-      }
-  }
+  )
 }

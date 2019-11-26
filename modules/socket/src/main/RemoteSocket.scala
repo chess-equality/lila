@@ -4,18 +4,22 @@ import chess.Centis
 import io.lettuce.core._
 import io.lettuce.core.pubsub.StatefulRedisPubSubConnection
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.ConcurrentHashMap
+import ornicar.scalalib.Zero
 import play.api.libs.json._
-import scala.concurrent.Future
+import scala.concurrent.duration._
+import scala.concurrent.{ Promise, Future }
 
-import lila.common.Chronometer
+import lila.common.{ Bus, Chronometer }
 import lila.hub.actorApi.relation.ReloadOnlineFriends
 import lila.hub.actorApi.round.{ MoveEvent, Mlat }
 import lila.hub.actorApi.security.CloseAccount
 import lila.hub.actorApi.socket.remote.{ TellSriIn, TellSriOut }
 import lila.hub.actorApi.socket.{ SendTo, SendTos, WithUserIds }
 import lila.hub.actorApi.{ Deploy, Announce }
+import lila.hub.{ TrouperMap, Trouper }
 import lila.socket.actorApi.SendToFlag
-import Socket.Sri
+import Socket.{ SocketVersion, GetVersion, Sri }
 
 final class RemoteSocket(
     redisClient: RedisClient,
@@ -29,11 +33,19 @@ final class RemoteSocket(
 
   type UserIds = Set[String]
 
+  private val requests = new ConcurrentHashMap[Int, Promise[String]](32)
+
+  def request[R](sendReq: Int => Unit, readRes: String => R): Fu[R] = {
+    val id = Math.abs(scala.util.Random.nextInt)
+    sendReq(id)
+    val promise = Promise[String]
+    requests.put(id, promise)
+    promise.future map readRes
+  }
+
   private val connectedUserIds = new AtomicReference(Set.empty[String])
 
   private val watchedGameIds = collection.mutable.Set.empty[String]
-
-  private def connectToPubSub = redisClient.connectPubSub()
 
   val baseHandler: Handler = {
     case In.ConnectUser(userId) =>
@@ -48,16 +60,24 @@ final class RemoteSocket(
     case In.FriendsBatch(userIds) => userIds foreach { userId =>
       bus.publish(ReloadOnlineFriends(userId), 'reloadOnlineFriends)
     }
-    case In.Lags(lags) => lags foreach (UserLagCache.put _).tupled
+    case In.Lags(lags) =>
+      lags foreach (UserLagCache.put _).tupled
+      // this shouldn't be necessary... ensure that users are known to be online
+      connectedUserIds.getAndUpdate((x: UserIds) => x ++ lags.keys)
     case In.TellSri(sri, userId, typ, msg) =>
       bus.publish(TellSriIn(sri.value, userId, msg), Symbol(s"remoteSocketIn:$typ"))
-    case In.DisconnectAll =>
-      logger.info("Remote socket disconnect all")
+    case In.WsBoot =>
+      logger.warn("Remote socket boot")
       connectedUserIds set Set.empty
       watchedGameIds.clear
+    case In.ReqResponse(reqId, response) =>
+      requests.computeIfPresent(reqId, (_: Int, promise: Promise[String]) => {
+        promise success response
+        null // remove from promises
+      })
   }
 
-  bus.subscribeFun('moveEvent, 'socketUsers, 'deploy, 'announce, 'mlat, 'sendToFlag, 'remoteSocketOut, 'accountClose) {
+  bus.subscribeFun('moveEvent, 'socketUsers, 'deploy, 'announce, 'mlat, 'sendToFlag, 'remoteSocketOut, 'accountClose, 'shadowban, 'impersonate) {
     case MoveEvent(gameId, fen, move) =>
       if (watchedGameIds(gameId)) send(Out.move(gameId, move, fen))
     case SendTos(userIds, payload) =>
@@ -65,8 +85,6 @@ final class RemoteSocket(
       if (connectedUsers.nonEmpty) send(Out.tellUsers(connectedUsers, payload))
     case SendTo(userId, payload) if connectedUserIds.get.contains(userId) =>
       send(Out.tellUser(userId, payload))
-    case d: Deploy =>
-      send(Out.tellAll(Json.obj("t" -> d.key)))
     case Announce(_, _, json) =>
       send(Out.tellAll(Json.obj("t" -> "announce", "d" -> json)))
     case Mlat(micros) =>
@@ -79,36 +97,38 @@ final class RemoteSocket(
       send(Out.disconnectUser(userId))
     case WithUserIds(f) =>
       f(connectedUserIds.get)
+    case lila.hub.actorApi.mod.Shadowban(userId, v) =>
+      send(Out.setTroll(userId, v))
+    case lila.hub.actorApi.mod.Impersonate(userId, modId) =>
+      send(Out.impersonate(userId, modId))
   }
 
   private def tick(nbConn: Int): Unit = {
     setNb(nbConn)
-    mon.connections(nbConn)
     mon.sets.games(watchedGameIds.size)
     mon.sets.users(connectedUserIds.get.size)
   }
 
   private val mon = lila.mon.socket.remote
 
-  def makeSender(channel: Channel): Sender = new Sender(connectToPubSub, channel)
+  def makeSender(channel: Channel): Sender = new Sender(redisClient.connectPubSub(), channel)
 
-  private val send: String => Unit = makeSender("site-out").apply _
+  private val send: Send = makeSender("site-out").apply _
 
-  def subscribe(channel: Channel, reader: In.Reader)(handler: Handler): Unit = {
-    val conn = connectToPubSub
+  def subscribe(channel: Channel, reader: In.Reader)(handler: Handler): Future[Unit] = {
+    val conn = redisClient.connectPubSub()
     conn.addListener(new pubsub.RedisPubSubAdapter[String, String] {
-      override def message(_channel: String, message: String): Unit = {
-        val raw = RawMsg(message)
-        mon.redis.in.channel(channel)()
-        mon.redis.in.path(channel, raw.path)()
-        // println(message, s"in:$channel")
-        reader(raw) collect handler match {
+      override def message(_channel: String, message: String): Unit =
+        reader(RawMsg(message)) collect handler match {
           case Some(_) => // processed
-          case None => logger.warn(s"Unhandled $message")
+          case None => logger.warn(s"Unhandled $channel $message")
         }
-      }
     })
-    conn.async.subscribe(channel)
+    val subPromise = Promise[Unit]
+    conn.async.subscribe(channel).thenRun {
+      new Runnable { def run = subPromise.success(()) }
+    }
+    subPromise.future
   }
 
   lifecycle.addStopHook { () =>
@@ -121,29 +141,23 @@ final class RemoteSocket(
 
 object RemoteSocket {
 
+  type Send = String => Unit
+
   final class Sender(conn: StatefulRedisPubSubConnection[String, String], channel: Channel) {
 
-    private val mon = lila.mon.socket.remote
-
-    def apply(msg: String): Unit = {
-      val chrono = Chronometer.start
-      Chronometer.syncMon(_.socket.remote.redis.publishTimeSync) {
-        // println(msg, s"out:$channel")
-        conn.async.publish(channel, msg).thenRun {
-          new Runnable { def run = chrono.mon(_.socket.remote.redis.publishTime) }
-        }
-      }
-      mon.redis.out.channel(channel)()
-      mon.redis.out.path(channel, msg.takeWhile(' ' !=))()
-    }
+    def apply(msg: String): Unit = conn.async.publish(channel, msg)
   }
 
   object Protocol {
 
-    case class RawMsg(path: Path, args: Args)
+    final class RawMsg(val path: Path, val args: Args) {
+      def get(nb: Int)(f: PartialFunction[Array[String], Option[In]]): Option[In] =
+        f.applyOrElse(args.split(" ", nb), (_: Array[String]) => None)
+      def all = args split ' '
+    }
     def RawMsg(msg: String): RawMsg = {
       val parts = msg.split(" ", 2)
-      RawMsg(parts(0), ~parts.lift(1))
+      new RawMsg(parts(0), ~parts.lift(1))
     }
 
     trait In
@@ -151,13 +165,11 @@ object RemoteSocket {
 
       type Reader = RawMsg => Option[In]
 
+      case object WsBoot extends In
       case class ConnectUser(userId: String) extends In
       case class DisconnectUsers(userId: Iterable[String]) extends In
-      case class ConnectSri(sri: Sri, userId: Option[String]) extends In // deprecated #TODO remove me
       case class ConnectSris(cons: Iterable[(Sri, Option[String])]) extends In
-      case class DisconnectSri(sri: Sri) extends In // deprecated #TODO remove me
       case class DisconnectSris(sris: Iterable[Sri]) extends In
-      case object DisconnectAll extends In
       case class Watch(gameId: String) extends In
       case class Unwatch(gameId: String) extends In
       case class NotifiedBatch(userIds: Iterable[String]) extends In
@@ -166,41 +178,47 @@ object RemoteSocket {
       case class Lags(lags: Map[String, Centis]) extends In
       case class FriendsBatch(userIds: Iterable[String]) extends In
       case class TellSri(sri: Sri, userId: Option[String], typ: String, msg: JsObject) extends In
+      case class ReqResponse(reqId: Int, response: String) extends In
 
       val baseReader: Reader = raw => raw.path match {
         case "connect/user" => ConnectUser(raw.args).some
-        case "disconnect/users" => DisconnectUsers(raw.args split ',').some
-        case "connect/sri" => raw.args.split(' ') |> { s => ConnectSri(Sri(s(0)), s lift 1).some }
+        case "disconnect/users" => DisconnectUsers(commas(raw.args)).some
         case "connect/sris" => ConnectSris {
-          raw.args.split(',') map (_ split ' ') map { s =>
+          commas(raw.args) map (_ split ' ') map { s =>
             (Sri(s(0)), s lift 1)
           }
         }.some
-        case "disconnect/sri" => DisconnectSri(Sri(raw.args)).some
-        case "disconnect/sris" => DisconnectSris(raw.args split ',' map Sri.apply).some
-        case "disconnect/all" => DisconnectAll.some
+        case "disconnect/sris" => DisconnectSris(commas(raw.args) map Sri.apply).some
         case "watch" => Watch(raw.args).some
         case "unwatch" => Unwatch(raw.args).some
-        case "notified/batch" => NotifiedBatch(raw.args split ' ').some
+        case "notified/batch" => NotifiedBatch(commas(raw.args)).some
         case "connections" => parseIntOption(raw.args) map Connections.apply
-        case "lag" => raw.args.split(' ') |> { s => s lift 1 flatMap parseIntOption map Centis.apply map { Lag(s(0), _) } }
-        case "lags" => Lags(raw.args.split(',').flatMap {
+        case "lag" => raw.all |> { s => s lift 1 flatMap parseIntOption map Centis.apply map { Lag(s(0), _) } }
+        case "lags" => Lags(commas(raw.args).flatMap {
           _ split ':' match {
             case Array(user, l) => parseIntOption(l) map { lag => user -> Centis(lag) }
             case _ => None
           }
         }.toMap).some
-        case "friends/batch" => FriendsBatch(raw.args split ',').some
-        case "tell/sri" => raw.args.split(" ", 3) match {
-          case Array(sri, userOrAnon, payload) => for {
-            obj <- Json.parse(payload).asOpt[JsObject]
-            typ <- obj str "t"
-            userId = userOrAnon.some.filter("-" !=)
-          } yield TellSri(Sri(sri), userId, typ, obj)
-          case _ => none
+        case "friends/batch" => FriendsBatch(commas(raw.args)).some
+        case "tell/sri" => raw.get(3)(tellSriMapper)
+        case "req/response" => raw.get(2) {
+          case Array(reqId, response) => parseIntOption(reqId) map { ReqResponse(_, response) }
         }
+        case "boot" => WsBoot.some
         case _ => none
       }
+
+      def tellSriMapper: PartialFunction[Array[String], Option[TellSri]] = {
+        case Array(sri, user, payload) => for {
+          obj <- Json.parse(payload).asOpt[JsObject]
+          typ <- obj str "t"
+        } yield TellSri(Sri(sri), optional(user), typ, obj)
+      }
+
+      def commas(str: String): Array[String] = if (str == "-") Array.empty else str split ','
+      def boolean(str: String): Boolean = str == "+"
+      def optional(str: String): Option[String] = if (str == "-") None else Some(str)
     }
 
     object Out {
@@ -209,7 +227,7 @@ object RemoteSocket {
       def tellUser(userId: String, payload: JsObject) =
         s"tell/users $userId ${Json stringify payload}"
       def tellUsers(userIds: Set[String], payload: JsObject) =
-        s"tell/users ${commaList(userIds)} ${Json stringify payload}"
+        s"tell/users ${commas(userIds)} ${Json stringify payload}"
       def tellAll(payload: JsObject) =
         s"tell/all ${Json stringify payload}"
       def tellFlag(flag: String, payload: JsObject) =
@@ -217,15 +235,21 @@ object RemoteSocket {
       def tellSri(sri: Sri, payload: JsValue) =
         s"tell/sri $sri ${Json stringify payload}"
       def tellSris(sris: Iterable[Sri], payload: JsValue) =
-        s"tell/sris ${commaList(sris)} ${Json stringify payload}"
+        s"tell/sris ${commas(sris)} ${Json stringify payload}"
       def mlat(micros: Int) =
         s"mlat ${((micros / 100) / 10d)}"
       def disconnectUser(userId: String) =
         s"disconnect/user $userId"
+      def setTroll(userId: String, v: Boolean) =
+        s"mod/troll/set $userId ${boolean(v)}"
+      def impersonate(userId: String, by: Option[String]) =
+        s"mod/impersonate $userId ${optional(by)}"
+      def boot = "boot"
 
-      def commaList(strs: Iterable[Any]) =
-        if (strs.isEmpty) "-"
-        else strs mkString ","
+      def commas(strs: Iterable[Any]): String = if (strs.isEmpty) "-" else strs mkString ","
+      def boolean(v: Boolean): String = if (v) "+" else "-"
+      def color(c: chess.Color): String = c.fold("w", "b")
+      def optional(str: Option[String]) = str getOrElse "-"
     }
   }
 

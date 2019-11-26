@@ -9,6 +9,7 @@ import actorApi.round.{ HumanPlay, DrawNo, TooManyPlies, TakebackNo, ForecastPla
 import akka.actor.ActorRef
 import lila.game.actorApi.MoveGameEvent
 import lila.game.{ Game, GameDiff, Progress, Pov, UciMemo }
+import lila.game.Game.{ PlayerId, FullId }
 import lila.hub.actorApi.round.BotPlay
 
 private[round] final class Player(
@@ -23,7 +24,7 @@ private[round] final class Player(
   private case object Flagged extends MoveResult
   private case class MoveApplied(progress: Progress, move: MoveOrDrop) extends MoveResult
 
-  private[round] def human(play: HumanPlay, round: RoundDuct)(pov: Pov)(implicit proxy: GameProxy): Fu[Events] = play match {
+  private[round] def human(play: HumanPlay, round: AnyRoundDuct)(pov: Pov)(implicit proxy: GameProxy): Fu[Events] = play match {
     case p @ HumanPlay(playerId, uci, blur, lag, promiseOption) => pov match {
       case Pov(game, _) if game.turns > Game.maxPlies =>
         round ! TooManyPlies
@@ -45,7 +46,7 @@ private[round] final class Player(
     }
   }
 
-  private[round] def bot(play: BotPlay, round: RoundDuct)(pov: Pov)(implicit proxy: GameProxy): Fu[Events] = play match {
+  private[round] def bot(play: BotPlay, round: AnyRoundDuct)(pov: Pov)(implicit proxy: GameProxy): Fu[Events] = play match {
     case p @ BotPlay(playerId, uci, promiseOption) => pov match {
       case Pov(game, _) if game.turns > Game.maxPlies =>
         round ! TooManyPlies
@@ -67,7 +68,7 @@ private[round] final class Player(
   }
 
   private def postHumanOrBotPlay(
-    round: RoundDuct,
+    round: AnyRoundDuct,
     pov: Pov,
     progress: Progress,
     moveOrDrop: MoveOrDrop,
@@ -78,8 +79,8 @@ private[round] final class Player(
     val res = if (progress.game.finished) moveFinish(progress.game, pov.color) dmap { progress.events ::: _ }
     else {
       if (progress.game.playableByAi) requestFishnet(progress.game, round)
-      if (pov.opponent.isOfferingDraw) round ! DrawNo(pov.player.id)
-      if (pov.player.isProposingTakeback) round ! TakebackNo(pov.player.id)
+      if (pov.opponent.isOfferingDraw) round ! DrawNo(PlayerId(pov.player.id))
+      if (pov.player.isProposingTakeback) round ! TakebackNo(PlayerId(pov.player.id))
       if (progress.game.forecastable) moveOrDrop.left.toOption.foreach { move =>
         round ! ForecastPlay(move)
       }
@@ -89,24 +90,22 @@ private[round] final class Player(
     res >>- promiseOption.foreach(_.success(()))
   }
 
-  private[round] def fishnet(game: Game, uci: Uci, currentFen: FEN, round: RoundDuct)(implicit proxy: GameProxy): Fu[Events] =
-    if (game.playable && game.player.isAi) {
-      if (currentFen == FEN(Forsyth >> game.chess))
-        applyUci(game, uci, blur = false, metrics = fishnetLag)
-          .fold(errs => fufail(ClientError(errs.shows)), fuccess).flatMap {
-            case Flagged => finisher.outOfTime(game)
-            case MoveApplied(progress, moveOrDrop) =>
-              proxy.save(progress) >>-
-                uciMemo.add(progress.game, moveOrDrop) >>-
-                notifyMove(moveOrDrop, progress.game) >> {
-                  if (progress.game.finished) moveFinish(progress.game, game.turnColor) dmap { progress.events ::: _ }
-                  else fuccess(progress.events)
-                }
-          }
-      else requestFishnet(game, round) >> fufail(FishnetError("Invalid AI move current FEN"))
-    } else fufail(FishnetError("Not AI turn"))
+  private[round] def fishnet(game: Game, ply: Int, uci: Uci, round: AnyRoundDuct)(implicit proxy: GameProxy): Fu[Events] =
+    if (game.playable && game.player.isAi && game.playedTurns == ply) {
+      applyUci(game, uci, blur = false, metrics = fishnetLag)
+        .fold(errs => fufail(ClientError(errs.shows)), fuccess).flatMap {
+          case Flagged => finisher.outOfTime(game)
+          case MoveApplied(progress, moveOrDrop) =>
+            proxy.save(progress) >>-
+              uciMemo.add(progress.game, moveOrDrop) >>-
+              notifyMove(moveOrDrop, progress.game) >> {
+                if (progress.game.finished) moveFinish(progress.game, game.turnColor) dmap { progress.events ::: _ }
+                else fuccess(progress.events)
+              }
+        }
+    } else fufail(FishnetError(s"Not AI turn move: ${uci} id: ${game.id} playable: ${game.playable} player: ${game.player}"))
 
-  private def requestFishnet(game: Game, round: RoundDuct): Funit = game.playableByAi ?? {
+  private[round] def requestFishnet(game: Game, round: AnyRoundDuct): Funit = game.playableByAi ?? {
     if (game.turns <= fishnetPlayer.maxPlies) fishnetPlayer(game)
     else fuccess(round ! actorApi.round.ResignAi)
   }

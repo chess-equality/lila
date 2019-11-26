@@ -9,17 +9,20 @@ import scala.concurrent.duration._
 import actorApi._, round._
 import chess.Color
 import lila.game.{ Game, Progress, Pov, Event, Source, Player => GamePlayer }
+import lila.game.Game.{ PlayerId, FullId }
 import lila.hub.actorApi.DeployPost
 import lila.hub.actorApi.map._
-import lila.hub.actorApi.round.{ FishnetPlay, BotPlay, RematchYes, RematchNo, Abort, Resign }
+import lila.hub.actorApi.round.{ FishnetPlay, FishnetStart, BotPlay, RematchYes, RematchNo, Abort, Resign }
 import lila.hub.Duct
 import lila.socket.UserLagCache
 import makeTimeout.large
 
+trait AnyRoundDuct extends Duct
+
 private[round] final class RoundDuct(
     dependencies: RoundDuct.Dependencies,
     gameId: Game.ID
-)(implicit proxy: GameProxy) extends Duct {
+)(implicit proxy: GameProxy) extends AnyRoundDuct {
 
   import RoundDuct._
   import dependencies._
@@ -48,15 +51,15 @@ private[round] final class RoundDuct(
         else player.bot(p, this)(pov)
       }
 
-    case FishnetPlay(uci, currentFen) => handle { game =>
-      player.fishnet(game, uci, currentFen, this)
+    case FishnetPlay(uci, ply) => handle { game =>
+      player.fishnet(game, ply, uci, this)
     } >>- lila.mon.round.move.full.count()
 
-    case Abort(playerId) => handle(playerId) { pov =>
+    case Abort(playerId) => handle(PlayerId(playerId)) { pov =>
       pov.game.abortable ?? finisher.abort(pov)
     }
 
-    case Resign(playerId) => handle(playerId) { pov =>
+    case Resign(playerId) => handle(PlayerId(playerId)) { pov =>
       pov.game.resignable ?? finisher.other(pov.game, _.Resign, Some(!pov.color))
     }
 
@@ -97,7 +100,7 @@ private[round] final class RoundDuct(
     // flags a specific player, possibly without grace if self
     case ClientFlag(color, from) => handle { game =>
       (game.turnColor == color) ?? {
-        val toSelf = from has game.player(color).id
+        val toSelf = from has PlayerId(game.player(color).id)
         game.outoftime(withGrace = !toSelf) ?? finisher.outOfTime(game)
       }
     }
@@ -126,7 +129,7 @@ private[round] final class RoundDuct(
     case Threefold => proxy withGame { game =>
       drawer autoThreefold game map {
         _ foreach { pov =>
-          this ! DrawClaim(pov.player.id)
+          this ! DrawClaim(PlayerId(pov.player.id))
         }
       }
     }
@@ -141,8 +144,8 @@ private[round] final class RoundDuct(
       } inject Nil
     }
 
-    case RematchYes(playerRef) => handle(playerRef)(rematcher.yes)
-    case RematchNo(playerRef) => handle(playerRef)(rematcher.no)
+    case RematchYes(playerRef) => handle(PlayerId(playerRef))(rematcher.yes)
+    case RematchNo(playerRef) => handle(PlayerId(playerRef))(rematcher.no)
 
     case TakebackYes(playerRef) => handle(playerRef) { pov =>
       takebacker.yes(~takebackSituation)(pov) map {
@@ -170,7 +173,7 @@ private[round] final class RoundDuct(
     case ForecastPlay(lastMove) => handle { game =>
       forecastApi.nextMove(game, lastMove) map { mOpt =>
         mOpt foreach { move =>
-          this ! HumanPlay(game.player.id, move, false)
+          this ! HumanPlay(PlayerId(game.player.id), move, false)
         }
         Nil
       }
@@ -197,9 +200,15 @@ private[round] final class RoundDuct(
     case NoStart => handle { game =>
       game.timeBeforeExpiration.exists(_.centis == 0) ?? finisher.noStart(game)
     }
+
+    case FishnetStart => proxy.game map {
+      _.filter(_.playableByAi) foreach {
+        player.requestFishnet(_, this)
+      }
+    }
   }
 
-  private[this] def recordLag(pov: Pov) =
+  private[this] def recordLag(pov: Pov): Unit =
     if ((pov.game.playedTurns & 30) == 10) {
       // Triggers every 32 moves starting on ply 10.
       // i.e. 10, 11, 42, 43, 74, 75, ...
@@ -213,13 +222,13 @@ private[round] final class RoundDuct(
   private[this] def handle[A](op: Game => Fu[Events]): Funit =
     handleGame(proxy.game)(op)
 
-  private[this] def handle(playerId: String)(op: Pov => Fu[Events]): Funit =
-    handlePov(proxy playerPov playerId)(op)
+  private[this] def handle(playerId: PlayerId)(op: Pov => Fu[Events]): Funit =
+    handlePov(proxy playerPov playerId.value)(op)
 
   private[this] def handleHumanPlay(p: HumanPlay)(op: Pov => Fu[Events]): Funit =
     handlePov {
       p.trace.segment("fetch", "db") {
-        proxy playerPov p.playerId
+        proxy playerPov p.playerId.value
       }
     }(op)
 
@@ -229,21 +238,24 @@ private[round] final class RoundDuct(
   private[this] def handle(color: Color)(op: Pov => Fu[Events]): Funit =
     handlePov(proxy pov color)(op)
 
-  private[this] def handlePov(pov: Fu[Option[Pov]])(op: Pov => Fu[Events]): Funit = publish {
+  private[this] def handlePov(pov: Fu[Option[Pov]])(op: Pov => Fu[Events]): Funit =
     pov flatten "pov not found" flatMap { p =>
-      if (p.player.isAi) fufail(s"player $p can't play AI") else op(p)
-    }
-  } recover errorHandler("handlePov")
+      (if (p.player.isAi) fufail(s"player $p can't play AI") else op(p)) map {
+        publish(p.game, _)
+      }
+    } recover errorHandler("handlePov")
 
-  private[this] def handleAi(game: Fu[Option[Game]])(op: Pov => Fu[Events]): Funit = publish {
-    game.map(_.flatMap(_.aiPov)) flatten "pov not found" flatMap op
-  } recover errorHandler("handleAi")
+  private[this] def handleAi(game: Fu[Option[Game]])(op: Pov => Fu[Events]): Funit =
+    game.map(_.flatMap(_.aiPov)) flatten "pov not found" flatMap { pov =>
+      op(pov) map { publish(pov.game, _) }
+    } recover errorHandler("handleAi")
 
-  private[this] def handleGame(game: Fu[Option[Game]])(op: Game => Fu[Events]): Funit = publish {
-    game flatten "game not found" flatMap op
-  } recover errorHandler("handleGame")
+  private[this] def handleGame(game: Fu[Option[Game]])(op: Game => Fu[Events]): Funit =
+    game flatten "game not found" flatMap { g =>
+      op(g) map { publish(g, _) }
+    } recover errorHandler("handleGame")
 
-  private[this] def publish[A](op: Fu[Events]): Funit = op.map { events =>
+  private[this] def publish[A](game: Game, events: Events): Unit =
     if (events.nonEmpty) {
       socketMap.tell(gameId, EventList(events))
       if (events exists {
@@ -251,7 +263,6 @@ private[round] final class RoundDuct(
         case _ => false
       }) this ! Threefold
     }
-  }
 
   private[this] def errorHandler(name: String): PartialFunction[Throwable, Unit] = {
     case e: ClientError =>

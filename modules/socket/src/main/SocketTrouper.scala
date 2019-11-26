@@ -167,7 +167,7 @@ abstract class SocketTrouper[M <: SocketMember](
       userIds.map(lightUser).sequenceFu.map { users =>
         Json.obj(
           "nb" -> total,
-          "users" -> users.flatten.map(_.titleName),
+          "users" -> users.flatMap(_.map(_.titleName)),
           "anons" -> anons
         ).some
       }
@@ -181,17 +181,4 @@ object SocketTrouper extends Socket {
   case class GetNbMembers(promise: Promise[Int])
 
   val resyncMessage = makeMessage("resync")
-}
-
-// Not managed by a TrouperMap
-trait LoneSocket { self: SocketTrouper[_] =>
-
-  def monitoringName: String
-  def broomFrequency: FiniteDuration
-
-  system.scheduler.schedule(approximatly(0.1f)(12.seconds.toMillis).millis, broomFrequency) {
-    this ! lila.socket.actorApi.Broom
-    lila.mon.socket.queueSize(monitoringName)(queueSize)
-  }
-  system.lilaBus.subscribe(this, 'deploy, 'announce)
 }

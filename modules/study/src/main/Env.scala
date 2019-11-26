@@ -20,6 +20,7 @@ final class Env(
     notifyApi: lila.notify.NotifyApi,
     getPref: User => Fu[lila.pref.Pref],
     getRelation: (User.ID, User.ID) => Fu[Option[lila.relation.Relation]],
+    remoteSocketApi: lila.socket.RemoteSocket,
     system: ActorSystem,
     hub: lila.hub.Env,
     db: lila.db.Env,
@@ -29,9 +30,6 @@ final class Env(
   private val settings = new {
     val CollectionStudy = config getString "collection.study"
     val CollectionChapter = config getString "collection.chapter"
-    val HistoryMessageTtl = config duration "history.message.ttl"
-    val SriTimeout = config duration "sri.timeout"
-    val SocketTimeout = config duration "socket.timeout"
     val SequencerTimeout = config duration "sequencer.timeout"
     val NetDomain = config getString "net.domain"
     val NetBaseUrl = config getString "net.base_url"
@@ -39,37 +37,19 @@ final class Env(
   }
   import settings._
 
-  val socketMap: SocketMap = lila.socket.SocketMap[StudySocket](
-    system = system,
-    mkTrouper = (studyId: String) => new StudySocket(
-      system = system,
-      studyId = Study.Id(studyId),
-      jsonView = jsonView,
-      studyRepo = studyRepo,
-      chapterRepo = chapterRepo,
-      lightUserApi = lightUserApi,
-      history = new lila.socket.History(ttl = HistoryMessageTtl),
-      sriTtl = SriTimeout,
-      lightStudyCache = lightStudyCache,
-      keepMeAlive = () => socketMap touch studyId
-    ),
-    accessTimeout = SocketTimeout,
-    monitoringName = "study.socketMap",
-    broomFrequency = 3697 millis
-  )
-
   def version(studyId: Study.Id): Fu[SocketVersion] =
-    socketMap.askIfPresentOrZero[SocketVersion](studyId.value)(GetVersion)
+    socket.rooms.ask[SocketVersion](studyId.value)(GetVersion)
 
   def isConnected(studyId: Study.Id, userId: User.ID): Fu[Boolean] =
-    socketMap.askIfPresentOrZero[Boolean](studyId.value)(HasUserId(userId, _))
+    socket.isPresent(studyId, userId)
 
-  lazy val socketHandler = new SocketHandler(
-    hub = hub,
-    socketMap = socketMap,
-    chat = hub.chat,
+  private val socket = new StudySocket(
     api = api,
-    evalCacheHandler = evalCacheHandler
+    jsonView = jsonView,
+    lightStudyCache = lightStudyCache,
+    remoteSocketApi = remoteSocketApi,
+    chat = hub.chat,
+    bus = system.lilaBus
   )
 
   private lazy val chapterColl = db(CollectionChapter)
@@ -127,7 +107,7 @@ final class Env(
     sequencer = sequencer,
     api = api,
     chapterRepo = chapterRepo,
-    socketMap = socketMap,
+    socket = socket,
     divider = divider
   )
 
@@ -144,7 +124,6 @@ final class Env(
     chat = hub.chat,
     bus = system.lilaBus,
     timeline = hub.timeline,
-    socketMap = socketMap,
     serverEvalRequester = serverEvalRequester,
     lightStudyCache = lightStudyCache
   )
@@ -180,11 +159,8 @@ final class Env(
     }
   }
 
-  system.lilaBus.subscribeFun('gdprErase, 'deploy) {
+  system.lilaBus.subscribeFun('gdprErase, 'studyAnalysisProgress) {
     case lila.user.User.GDPRErase(user) => api erase user
-    case m: lila.hub.actorApi.Deploy => socketMap tellAll m
-  }
-  system.lilaBus.subscribeFun('studyAnalysisProgress) {
     case lila.analyse.actorApi.StudyAnalysisProgress(analysis, complete) => serverEvalMerger(analysis, complete)
   }
 }
@@ -202,6 +178,7 @@ object Env {
     notifyApi = lila.notify.Env.current.api,
     getPref = lila.pref.Env.current.api.getPref,
     getRelation = lila.relation.Env.current.api.fetchRelation,
+    remoteSocketApi = lila.socket.Env.current.remoteSocket,
     system = lila.common.PlayApp.system,
     hub = lila.hub.Env.current,
     db = lila.db.Env.current,

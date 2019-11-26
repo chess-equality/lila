@@ -185,6 +185,9 @@ object mon {
     object actor {
       val count = rec("round.actor.count")
     }
+    object duct {
+      val count = rec("round.duct.count")
+    }
     object forecast {
       val create = inc("round.forecast.create")
     }
@@ -303,6 +306,9 @@ object mon {
 
       def passwordResetRequest(s: String) = inc(s"user.auth.password_reset_request.$s")
       def passwordResetConfirm(s: String) = inc(s"user.auth.password_reset_confirm.$s")
+
+      def magicLinkRequest(s: String) = inc(s"user.auth.magic_link_request.$s")
+      def magicLinkConfirm(s: String) = inc(s"user.auth.magic_link_confirm.$s")
     }
     object oauth {
       object usage {
@@ -325,23 +331,6 @@ object mon {
       object sets {
         val users = rec("socket.remote.sets.users")
         val games = rec("socket.remote.sets.games")
-      }
-      val connections = rec("socket.remote.connections")
-      object redis {
-        val publishTime = rec("socket.remote.redis.publish_time")
-        val publishTimeSync = rec("socket.remote.redis.publish_time.sync")
-        object in {
-          def channel(channel: String) = inc(s"socket.remote.redis.in.channel.$channel")
-          def path(channel: String, path: String) = inc(s"socket.remote.redis.in.path.$channel:$path")
-        }
-        object out {
-          def channel(channel: String) = inc(s"socket.remote.redis.out.channel.$channel")
-          def path(channel: String, path: String) = inc(s"socket.remote.redis.out.path.$channel:$path")
-        }
-      }
-      object lobby {
-        def tellSri(tpe: String) = inc(s"socket.remote.lobby.tell_sri.$tpe")
-        val missingSri = inc("socket.remote.lobby.missing_sri")
       }
     }
   }
@@ -395,6 +384,7 @@ object mon {
   object email {
     object types {
       val resetPassword = inc("email.reset_password")
+      val magicLink = inc("email.magic_link")
       val fix = inc("email.fix")
       val change = inc("email.change")
       val confirmation = inc("email.confirmation")
@@ -477,6 +467,7 @@ object mon {
     val player = rec("tournament.player")
     object startedOrganizer {
       val tickTime = rec("tournament.started_organizer.tick_time")
+      val waitingUsersTime = rec("tournament.started_organizer.waiting_users_time")
     }
     object createdOrganizer {
       val tickTime = rec("tournament.created_organizer.tick_time")
@@ -566,6 +557,7 @@ object mon {
   }
   object chat {
     val message = inc("chat.message")
+    val trollTrue = inc("chat.message.troll.true")
   }
   object push {
     object register {
@@ -617,13 +609,6 @@ object mon {
       def acquired(skill: String) = rec(s"fishnet.work.$skill.acquired")
       def queued(skill: String) = rec(s"fishnet.work.$skill.queued")
       def forUser(skill: String) = rec(s"fishnet.work.$skill.for_user")
-      val moveDbSize = rec("fishnet.work.move.db_size")
-    }
-    object move {
-      def time(client: String) = rec(s"fishnet.move.time.$client")
-      def fullTimeLvl1(client: String) = rec(s"fishnet.move.full_time_lvl_1.$client")
-      val post = rec("fishnet.move.post")
-      val dbDrop = inc("fishnet.move.db_drop")
     }
     object analysis {
       def by(client: String) = new {
