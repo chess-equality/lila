@@ -16,7 +16,6 @@ final class ChatApi(
     shutup: akka.actor.ActorSelection,
     modLog: akka.actor.ActorSelection,
     asyncCache: lila.memo.AsyncCache.Builder,
-    lilaBus: lila.common.Bus,
     maxLinesPerChat: Int,
     netDomain: String
 ) {
@@ -194,11 +193,11 @@ final class ChatApi(
   }
 
   private def publish(chatId: Chat.Id, msg: Any): Unit =
-    lilaBus.publish(msg, classify(chatId))
+    lila.common.Bus.publish(msg, classify(chatId))
 
-  private[chat] def remove(chatId: Chat.Id) = coll.remove($id(chatId)).void
+  def remove(chatId: Chat.Id) = coll.remove($id(chatId)).void
 
-  private[chat] def removeAll(chatIds: List[Chat.Id]) = coll.remove($inIds(chatIds)).void
+  def removeAll(chatIds: List[Chat.Id]) = coll.remove($inIds(chatIds)).void
 
   private def pushLine(chatId: Chat.Id, line: Line): Funit = coll.update(
     $id(chatId),

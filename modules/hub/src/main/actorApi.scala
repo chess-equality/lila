@@ -27,8 +27,6 @@ package map {
 }
 
 package socket {
-  case class WithUserIds(f: Iterable[String] => Unit)
-  case class HasUserId(userId: String, promise: Promise[Boolean])
   case class SendTo(userId: String, message: JsObject)
   object SendTo {
     def apply[A: Writes](userId: String, typ: String, data: A): SendTo =
@@ -42,8 +40,8 @@ package socket {
   object remote {
     case class TellSriIn(sri: String, user: Option[String], msg: JsObject)
     case class TellSriOut(sri: String, payload: JsValue)
-    case class ConnectUser(userId: String)
   }
+  case class BotIsOnline(userId: String, isOnline: Boolean)
 }
 
 package report {
@@ -87,7 +85,6 @@ package mod {
 
 package playban {
   case class Playban(userId: String, mins: Int)
-  case class SitcounterClose(userId: String)
 }
 
 package captcha {
@@ -242,7 +239,6 @@ package round {
       simulId: String,
       opponentUserId: String
   )
-  case class NbRounds(nb: Int)
   case class Berserk(gameId: String, userId: String)
   case class IsOnGame(color: chess.Color, promise: Promise[Boolean])
   case class TourStandingOld(data: JsArray)

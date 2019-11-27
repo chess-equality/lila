@@ -12,20 +12,17 @@ import scala.concurrent.{ Promise, Future }
 
 import lila.common.{ Bus, Chronometer }
 import lila.hub.actorApi.relation.ReloadOnlineFriends
-import lila.hub.actorApi.round.{ MoveEvent, Mlat }
+import lila.hub.actorApi.round.Mlat
 import lila.hub.actorApi.security.CloseAccount
 import lila.hub.actorApi.socket.remote.{ TellSriIn, TellSriOut }
-import lila.hub.actorApi.socket.{ SendTo, SendTos, WithUserIds }
+import lila.hub.actorApi.socket.{ SendTo, SendTos, BotIsOnline }
 import lila.hub.actorApi.{ Deploy, Announce }
 import lila.hub.{ TrouperMap, Trouper }
-import lila.socket.actorApi.SendToFlag
-import Socket.{ SocketVersion, GetVersion, Sri }
+import Socket.{ SocketVersion, GetVersion, Sri, SendToFlag }
 
 final class RemoteSocket(
     redisClient: RedisClient,
     notificationActor: akka.actor.ActorSelection,
-    setNb: Int => Unit,
-    bus: lila.common.Bus,
     lifecycle: play.api.inject.ApplicationLifecycle
 ) {
 
@@ -43,33 +40,26 @@ final class RemoteSocket(
     promise.future map readRes
   }
 
-  private val connectedUserIds = new AtomicReference(Set.empty[String])
-
-  private val watchedGameIds = collection.mutable.Set.empty[String]
+  val onlineUserIds: AtomicReference[Set[String]] = new AtomicReference(Set("lichess"))
 
   val baseHandler: Handler = {
     case In.ConnectUser(userId) =>
-      bus.publish(lila.hub.actorApi.socket.remote.ConnectUser(userId), 'userActive)
-      connectedUserIds.getAndUpdate((x: UserIds) => x + userId)
+      onlineUserIds.getAndUpdate((x: UserIds) => x + userId)
     case In.DisconnectUsers(userIds) =>
-      connectedUserIds.getAndUpdate((x: UserIds) => x -- userIds)
-    case In.Watch(gameId) => watchedGameIds += gameId
-    case In.Unwatch(gameId) => watchedGameIds -= gameId
+      onlineUserIds.getAndUpdate((x: UserIds) => x -- userIds)
     case In.NotifiedBatch(userIds) => notificationActor ! lila.hub.actorApi.notify.NotifiedBatch(userIds)
-    case In.Connections(nb) => tick(nb)
     case In.FriendsBatch(userIds) => userIds foreach { userId =>
-      bus.publish(ReloadOnlineFriends(userId), 'reloadOnlineFriends)
+      Bus.publish(ReloadOnlineFriends(userId), 'reloadOnlineFriends)
     }
     case In.Lags(lags) =>
       lags foreach (UserLagCache.put _).tupled
       // this shouldn't be necessary... ensure that users are known to be online
-      connectedUserIds.getAndUpdate((x: UserIds) => x ++ lags.keys)
+      onlineUserIds.getAndUpdate((x: UserIds) => x ++ lags.keys)
     case In.TellSri(sri, userId, typ, msg) =>
-      bus.publish(TellSriIn(sri.value, userId, msg), Symbol(s"remoteSocketIn:$typ"))
+      Bus.publish(TellSriIn(sri.value, userId, msg), Symbol(s"remoteSocketIn:$typ"))
     case In.WsBoot =>
       logger.warn("Remote socket boot")
-      connectedUserIds set Set.empty
-      watchedGameIds.clear
+      onlineUserIds set Set("lichess")
     case In.ReqResponse(reqId, response) =>
       requests.computeIfPresent(reqId, (_: Int, promise: Promise[String]) => {
         promise success response
@@ -77,39 +67,29 @@ final class RemoteSocket(
       })
   }
 
-  bus.subscribeFun('moveEvent, 'socketUsers, 'deploy, 'announce, 'mlat, 'sendToFlag, 'remoteSocketOut, 'accountClose, 'shadowban, 'impersonate) {
-    case MoveEvent(gameId, fen, move) =>
-      if (watchedGameIds(gameId)) send(Out.move(gameId, move, fen))
+  Bus.subscribeFun('socketUsers, 'deploy, 'announce, 'mlat, 'sendToFlag, 'remoteSocketOut, 'accountClose, 'shadowban, 'impersonate, 'botIsOnline) {
     case SendTos(userIds, payload) =>
-      val connectedUsers = userIds intersect connectedUserIds.get
+      val connectedUsers = userIds intersect onlineUserIds.get
       if (connectedUsers.nonEmpty) send(Out.tellUsers(connectedUsers, payload))
-    case SendTo(userId, payload) if connectedUserIds.get.contains(userId) =>
+    case SendTo(userId, payload) if onlineUserIds.get.contains(userId) =>
       send(Out.tellUser(userId, payload))
     case Announce(_, _, json) =>
       send(Out.tellAll(Json.obj("t" -> "announce", "d" -> json)))
     case Mlat(micros) =>
       send(Out.mlat(micros))
-    case actorApi.SendToFlag(flag, payload) =>
+    case Socket.SendToFlag(flag, payload) =>
       send(Out.tellFlag(flag, payload))
     case TellSriOut(sri, payload) =>
       send(Out.tellSri(Sri(sri), payload))
     case CloseAccount(userId) =>
       send(Out.disconnectUser(userId))
-    case WithUserIds(f) =>
-      f(connectedUserIds.get)
     case lila.hub.actorApi.mod.Shadowban(userId, v) =>
       send(Out.setTroll(userId, v))
     case lila.hub.actorApi.mod.Impersonate(userId, modId) =>
       send(Out.impersonate(userId, modId))
+    case BotIsOnline(userId, value) =>
+      onlineUserIds.getAndUpdate((x: UserIds) => { if (value) x + userId else x - userId })
   }
-
-  private def tick(nbConn: Int): Unit = {
-    setNb(nbConn)
-    mon.sets.games(watchedGameIds.size)
-    mon.sets.users(connectedUserIds.get.size)
-  }
-
-  private val mon = lila.mon.socket.remote
 
   def makeSender(channel: Channel): Sender = new Sender(redisClient.connectPubSub(), channel)
 
@@ -141,6 +121,8 @@ final class RemoteSocket(
 
 object RemoteSocket {
 
+  private val logger = lila log "socket"
+
   type Send = String => Unit
 
   final class Sender(conn: StatefulRedisPubSubConnection[String, String], channel: Channel) {
@@ -170,10 +152,7 @@ object RemoteSocket {
       case class DisconnectUsers(userId: Iterable[String]) extends In
       case class ConnectSris(cons: Iterable[(Sri, Option[String])]) extends In
       case class DisconnectSris(sris: Iterable[Sri]) extends In
-      case class Watch(gameId: String) extends In
-      case class Unwatch(gameId: String) extends In
       case class NotifiedBatch(userIds: Iterable[String]) extends In
-      case class Connections(nb: Int) extends In
       case class Lag(userId: String, lag: Centis) extends In
       case class Lags(lags: Map[String, Centis]) extends In
       case class FriendsBatch(userIds: Iterable[String]) extends In
@@ -189,10 +168,7 @@ object RemoteSocket {
           }
         }.some
         case "disconnect/sris" => DisconnectSris(commas(raw.args) map Sri.apply).some
-        case "watch" => Watch(raw.args).some
-        case "unwatch" => Unwatch(raw.args).some
         case "notified/batch" => NotifiedBatch(commas(raw.args)).some
-        case "connections" => parseIntOption(raw.args) map Connections.apply
         case "lag" => raw.all |> { s => s lift 1 flatMap parseIntOption map Centis.apply map { Lag(s(0), _) } }
         case "lags" => Lags(commas(raw.args).flatMap {
           _ split ':' match {
@@ -222,8 +198,6 @@ object RemoteSocket {
     }
 
     object Out {
-      def move(gameId: String, move: String, fen: String) =
-        s"move $gameId $move $fen"
       def tellUser(userId: String, payload: JsObject) =
         s"tell/users $userId ${Json stringify payload}"
       def tellUsers(userIds: Set[String], payload: JsObject) =

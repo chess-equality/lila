@@ -8,13 +8,13 @@ import chess.{ MoveMetrics, Centis, Status, Color, MoveOrDrop }
 import actorApi.round.{ HumanPlay, DrawNo, TooManyPlies, TakebackNo, ForecastPlay }
 import akka.actor.ActorRef
 import lila.game.actorApi.MoveGameEvent
+import lila.common.Bus
 import lila.game.{ Game, GameDiff, Progress, Pov, UciMemo }
 import lila.game.Game.{ PlayerId, FullId }
 import lila.hub.actorApi.round.BotPlay
 
 private[round] final class Player(
     fishnetPlayer: lila.fishnet.Player,
-    bus: lila.common.Bus,
     finisher: Finisher,
     scheduleExpiration: Game => Unit,
     uciMemo: UciMemo
@@ -24,7 +24,7 @@ private[round] final class Player(
   private case object Flagged extends MoveResult
   private case class MoveApplied(progress: Progress, move: MoveOrDrop) extends MoveResult
 
-  private[round] def human(play: HumanPlay, round: AnyRoundDuct)(pov: Pov)(implicit proxy: GameProxy): Fu[Events] = play match {
+  private[round] def human(play: HumanPlay, round: RoundDuct)(pov: Pov)(implicit proxy: GameProxy): Fu[Events] = play match {
     case p @ HumanPlay(playerId, uci, blur, lag, promiseOption) => pov match {
       case Pov(game, _) if game.turns > Game.maxPlies =>
         round ! TooManyPlies
@@ -46,7 +46,7 @@ private[round] final class Player(
     }
   }
 
-  private[round] def bot(play: BotPlay, round: AnyRoundDuct)(pov: Pov)(implicit proxy: GameProxy): Fu[Events] = play match {
+  private[round] def bot(play: BotPlay, round: RoundDuct)(pov: Pov)(implicit proxy: GameProxy): Fu[Events] = play match {
     case p @ BotPlay(playerId, uci, promiseOption) => pov match {
       case Pov(game, _) if game.turns > Game.maxPlies =>
         round ! TooManyPlies
@@ -68,7 +68,7 @@ private[round] final class Player(
   }
 
   private def postHumanOrBotPlay(
-    round: AnyRoundDuct,
+    round: RoundDuct,
     pov: Pov,
     progress: Progress,
     moveOrDrop: MoveOrDrop,
@@ -90,7 +90,7 @@ private[round] final class Player(
     res >>- promiseOption.foreach(_.success(()))
   }
 
-  private[round] def fishnet(game: Game, ply: Int, uci: Uci, round: AnyRoundDuct)(implicit proxy: GameProxy): Fu[Events] =
+  private[round] def fishnet(game: Game, ply: Int, uci: Uci, round: RoundDuct)(implicit proxy: GameProxy): Fu[Events] =
     if (game.playable && game.player.isAi && game.playedTurns == ply) {
       applyUci(game, uci, blur = false, metrics = fishnetLag)
         .fold(errs => fufail(ClientError(errs.shows)), fuccess).flatMap {
@@ -105,7 +105,7 @@ private[round] final class Player(
         }
     } else fufail(FishnetError(s"Not AI turn move: ${uci} id: ${game.id} playable: ${game.playable} player: ${game.player}"))
 
-  private[round] def requestFishnet(game: Game, round: AnyRoundDuct): Funit = game.playableByAi ?? {
+  private[round] def requestFishnet(game: Game, round: RoundDuct): Funit = game.playableByAi ?? {
     if (game.turns <= fishnetPlayer.maxPlies) fishnetPlayer(game)
     else fuccess(round ! actorApi.round.ResignAi)
   }
@@ -137,16 +137,14 @@ private[round] final class Player(
       fen = Forsyth exportBoard game.board,
       move = moveOrDrop.fold(_.toUci.keys, _.toUci.uci)
     )
-    // publish all moves
-    bus.publish(moveEvent, 'moveEvent)
 
     // I checked and the bus doesn't do much if there's no subscriber for a classifier,
     // so we should be good here.
-    // also use for targeted TvBroadcast subscription
-    bus.publish(MoveGameEvent makeBusEvent MoveGameEvent(game, moveEvent.fen, moveEvent.move))
+    // also used for targeted TvBroadcast subscription
+    Bus.publish(MoveGameEvent makeBusEvent MoveGameEvent(game, moveEvent.fen, moveEvent.move))
 
     // publish correspondence moves
-    if (game.isCorrespondence && game.nonAi) bus.publish(
+    if (game.isCorrespondence && game.nonAi) Bus.publish(
       CorresMoveEvent(
         move = moveEvent,
         playerUserId = game.player(color).userId,
@@ -161,7 +159,7 @@ private[round] final class Player(
     for {
       simulId <- game.simulId
       opponentUserId <- game.player(!color).userId
-    } bus.publish(
+    } Bus.publish(
       SimulMoveEvent(move = moveEvent, simulId = simulId, opponentUserId = opponentUserId),
       'moveEventSimul
     )

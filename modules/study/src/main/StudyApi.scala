@@ -6,7 +6,8 @@ import scala.concurrent.duration._
 import actorApi.Who
 import chess.Centis
 import chess.format.pgn.{ Tags, Glyph }
-import lila.chat.Chat
+import lila.chat.{ Chat, ChatApi }
+import lila.common.Bus
 import lila.hub.actorApi.map.Tell
 import lila.hub.actorApi.timeline.{ Propagate, StudyCreate, StudyLike }
 import lila.socket.Socket.Sri
@@ -24,8 +25,7 @@ final class StudyApi(
     explorerGameHandler: ExplorerGame,
     lightUser: lila.common.LightUser.GetterSync,
     scheduler: akka.actor.Scheduler,
-    chat: ActorSelection,
-    bus: lila.common.Bus,
+    chatApi: ChatApi,
     timeline: ActorSelection,
     serverEvalRequester: ServerEval.Requester,
     lightStudyCache: LightStudyCache
@@ -115,7 +115,7 @@ final class StudyApi(
     } orElse importGame(data.copy(form = data.form.copy(asStr = none)), user)
   }) addEffect {
     _ ?? { sc =>
-      bus.publish(actorApi.StartStudy(sc.study.id), 'startStudy)
+      Bus.publish(actorApi.StartStudy(sc.study.id), 'startStudy)
     }
   }
 
@@ -127,7 +127,7 @@ final class StudyApi(
         newChapters.headOption.map(study1.rewindTo) ?? { study =>
           studyRepo.insert(study) >>
             newChapters.map(chapterRepo.insert).sequenceFu >>- {
-              chat ! lila.chat.actorApi.SystemTalk(
+              chatApi.userChat.system(
                 Chat.Id(study.id.value),
                 s"Cloned from lichess.org/study/${prev.id}"
               )
@@ -157,7 +157,7 @@ final class StudyApi(
   def talk(userId: User.ID, studyId: Study.Id, text: String) = byId(studyId) foreach {
     _ foreach { study =>
       (study canChat userId) ?? {
-        chat ! lila.chat.actorApi.UserTalk(
+        chatApi.userChat.write(
           Chat.Id(studyId.value),
           userId = userId,
           text = text,
@@ -305,9 +305,9 @@ final class StudyApi(
       val role = StudyMember.Role.byId.getOrElse(roleStr, StudyMember.Role.Read)
       study.members.get(userId) ifTrue study.isPublic foreach { member =>
         if (!member.role.canWrite && role.canWrite)
-          bus.publish(lila.hub.actorApi.study.StudyMemberGotWriteAccess(userId, studyId.value), 'study)
+          Bus.publish(lila.hub.actorApi.study.StudyMemberGotWriteAccess(userId, studyId.value), 'study)
         else if (member.role.canWrite && !role.canWrite)
-          bus.publish(lila.hub.actorApi.study.StudyMemberLostWriteAccess(userId, studyId.value), 'study)
+          Bus.publish(lila.hub.actorApi.study.StudyMemberLostWriteAccess(userId, studyId.value), 'study)
       }
       studyRepo.setRole(study, userId, role) >>-
         onMembersChange(study)
@@ -324,7 +324,7 @@ final class StudyApi(
   def kick(studyId: Study.Id, userId: User.ID)(who: Who) = sequenceStudy(studyId) { study =>
     (study.isMember(userId) && (study.isOwner(who.u) ^ (who.u == userId))) ?? {
       if (study.isPublic && study.canContribute(userId))
-        bus.publish(lila.hub.actorApi.study.StudyMemberLostWriteAccess(userId, studyId.value), 'study)
+        Bus.publish(lila.hub.actorApi.study.StudyMemberLostWriteAccess(userId, studyId.value), 'study)
       studyRepo.removeMember(study, userId)
     } >>- onMembersChange(study)
   }
@@ -659,9 +659,9 @@ final class StudyApi(
         }
       )
       if (!study.isPublic && newStudy.isPublic) {
-        bus.publish(lila.hub.actorApi.study.StudyBecamePublic(studyId.value, study.members.contributorIds), 'study)
+        Bus.publish(lila.hub.actorApi.study.StudyBecamePublic(studyId.value, study.members.contributorIds), 'study)
       } else if (study.isPublic && !newStudy.isPublic) {
-        bus.publish(lila.hub.actorApi.study.StudyBecamePrivate(studyId.value, study.members.contributorIds), 'study)
+        Bus.publish(lila.hub.actorApi.study.StudyBecamePrivate(studyId.value, study.members.contributorIds), 'study)
       }
       (newStudy != study) ?? {
         studyRepo.updateSomeFields(newStudy) >>-
@@ -675,14 +675,14 @@ final class StudyApi(
   def delete(study: Study) = sequenceStudy(study.id) { study =>
     studyRepo.delete(study) >>
       chapterRepo.deleteByStudy(study) >>-
-      bus.publish(lila.hub.actorApi.study.RemoveStudy(study.id.value, study.members.contributorIds), 'study) >>-
+      Bus.publish(lila.hub.actorApi.study.RemoveStudy(study.id.value, study.members.contributorIds), 'study) >>-
       lightStudyCache.put(study.id, none)
   }
 
   def like(studyId: Study.Id, v: Boolean)(who: Who): Funit =
     studyRepo.like(studyId, who.u, v) map { likes =>
       sendTo(studyId)(_.setLiking(Study.Liking(likes, v), who))
-      bus.publish(actorApi.StudyLikes(studyId, likes), 'studyLikes)
+      Bus.publish(actorApi.StudyLikes(studyId, likes), 'studyLikes)
       if (v) studyRepo byId studyId foreach {
         _ foreach { study =>
           if (who.u != study.ownerId && study.isPublic)
@@ -719,12 +719,12 @@ final class StudyApi(
   }
 
   def erase(user: User) = studyRepo.allIdsByOwner(user.id) flatMap { ids =>
-    chat ! lila.chat.actorApi.RemoveAll(ids.map(id => Chat.Id(id.value)))
+    chatApi.removeAll(ids.map(id => Chat.Id(id.value)))
     studyRepo.deleteByIds(ids) >>
       chapterRepo.deleteByStudyIds(ids)
   }
 
-  private def sendStudyEnters(study: Study, userId: User.ID) = bus.publish(
+  private def sendStudyEnters(study: Study, userId: User.ID) = Bus.publish(
     lila.hub.actorApi.study.StudyDoor(
       userId = userId,
       studyId = study.id.value,
@@ -736,7 +736,7 @@ final class StudyApi(
   )
 
   private def indexStudy(study: Study) =
-    bus.publish(actorApi.SaveStudy(study), 'study)
+    Bus.publish(actorApi.SaveStudy(study), 'study)
 
   private def reloadSriBecauseOf(study: Study, sri: Sri, chapterId: Chapter.Id) =
     sendTo(study.id)(_.reloadSriBecauseOf(sri, chapterId))

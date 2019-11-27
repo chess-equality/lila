@@ -6,14 +6,13 @@ import play.api.libs.json.Json
 import scala.concurrent.duration._
 import scala.concurrent.Promise
 
-import lila.common.LightUser
+import lila.common.{ Bus, LightUser }
 import lila.game.Game
 import lila.hub.Trouper
 
 private[tv] final class TvTrouper(
     system: ActorSystem,
     rendererActor: ActorSelection,
-    selectChannel: lila.socket.Channel,
     lightUser: LightUser.GetterSync,
     onSelect: Game => Unit,
     proxyGame: Game.ID => Fu[Option[Game]],
@@ -22,7 +21,7 @@ private[tv] final class TvTrouper(
 
   import TvTrouper._
 
-  system.lilaBus.subscribe(this, 'startGame)
+  Bus.subscribe(this, 'startGame)
 
   private val channelTroupers: Map[Tv.Channel, ChannelTrouper] = Tv.Channel.all.map { c =>
     c -> new ChannelTrouper(c, lightUser, onSelect = this.!, proxyGame, rematchOf)
@@ -75,8 +74,7 @@ private[tv] final class TvTrouper(
           )
         }
       )
-      selectChannel ! lila.socket.Channel.Publish(makeMessage("tvSelect", data)) // TODO remove: old rounds
-      system.lilaBus.publish(lila.hub.actorApi.tv.TvSelect(game.id, game.speed, data), 'tvSelect) // new rounds
+      Bus.publish(lila.hub.actorApi.tv.TvSelect(game.id, game.speed, data), 'tvSelect)
       if (channel == Tv.Channel.Best) {
         implicit def timeout = makeTimeout(100 millis)
         actorAsk(rendererActor, actorApi.RenderFeaturedJs(game)) onSuccess {
@@ -89,7 +87,7 @@ private[tv] final class TvTrouper(
                 "id" -> game.id
               ))
             )
-            system.lilaBus.publish(event, 'changeFeaturedGame)
+            Bus.publish(event, 'changeFeaturedGame)
         }
       }
   }

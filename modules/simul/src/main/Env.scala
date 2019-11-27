@@ -4,9 +4,9 @@ import akka.actor._
 import com.typesafe.config.Config
 import scala.concurrent.duration._
 
+import lila.common.Bus
 import lila.game.Game
 import lila.hub.{ Duct, DuctMap }
-import lila.socket.History
 import lila.socket.Socket.{ GetVersion, SocketVersion }
 
 final class Env(
@@ -15,6 +15,7 @@ final class Env(
     scheduler: lila.common.Scheduler,
     db: lila.db.Env,
     hub: lila.hub.Env,
+    chatApi: lila.chat.ChatApi,
     lightUser: lila.common.LightUser.Getter,
     onGameStart: String => Unit,
     isOnline: String => Boolean,
@@ -49,11 +50,10 @@ final class Env(
     getSimul = repo.find,
     jsonView = jsonView,
     remoteSocketApi = remoteSocketApi,
-    chat = hub.chat,
-    bus = system.lilaBus
+    chat = chatApi
   )
 
-  system.lilaBus.subscribeFuns(
+  Bus.subscribeFuns(
     'finishGame -> {
       case lila.game.actorApi.FinishGame(game, _, _) => api finishGame game
     },
@@ -65,7 +65,7 @@ final class Env(
     },
     'moveEventSimul -> {
       case lila.hub.actorApi.round.SimulMoveEvent(move, simulId, opponentUserId) =>
-        system.lilaBus.publish(
+        Bus.publish(
           lila.hub.actorApi.socket.SendTo(
             opponentUserId,
             lila.socket.Socket.makeMessage("simulPlayerMove", move.gameId)
@@ -122,9 +122,10 @@ object Env {
     scheduler = lila.common.PlayApp.scheduler,
     db = lila.db.Env.current,
     hub = lila.hub.Env.current,
+    chatApi = lila.chat.Env.current.api,
     lightUser = lila.user.Env.current.lightUser,
     onGameStart = lila.round.Env.current.onStart,
-    isOnline = lila.user.Env.current.isOnline,
+    isOnline = lila.socket.Env.current.isOnline,
     asyncCache = lila.memo.Env.current.asyncCache,
     remoteSocketApi = lila.socket.Env.current.remoteSocket,
     proxyGame = lila.round.Env.current.proxy.game _

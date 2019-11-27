@@ -7,10 +7,8 @@ import scala.concurrent.Promise
 
 import lila.game.Game
 import lila.hub.{ Duct, DuctMap, TrouperMap }
-import lila.socket.History
 import lila.socket.Socket.{ GetVersion, SocketVersion }
 import lila.user.User
-import makeTimeout.short
 
 final class Env(
     config: Config,
@@ -21,6 +19,7 @@ final class Env(
     proxyGame: Game.ID => Fu[Option[Game]],
     flood: lila.security.Flood,
     hub: lila.hub.Env,
+    chatApi: lila.chat.ChatApi,
     tellRound: lila.round.TellRound,
     lightUserApi: lila.user.LightUserApi,
     isOnline: User.ID => Boolean,
@@ -85,7 +84,7 @@ final class Env(
 
   private val socket = new TournamentSocket(
     remoteSocketApi = remoteSocketApi,
-    chat = hub.chat,
+    chat = chatApi,
     system = system
   )
 
@@ -140,7 +139,7 @@ final class Env(
     accessTimeout = SequencerTimeout
   )
 
-  system.lilaBus.subscribe(
+  lila.common.Bus.subscribe(
     system.actorOf(Props(new ApiActor(api, leaderboardApi)), name = ApiActorName),
     'finishGame, 'adjustCheater, 'adjustBooster, 'playban
   )
@@ -156,8 +155,6 @@ final class Env(
   )))
 
   TournamentScheduler.start(system, api)
-
-  TournamentInviter.start(system.lilaBus, api, notifyApi)
 
   def version(tourId: Tournament.ID): Fu[SocketVersion] =
     socket.rooms.ask[SocketVersion](tourId)(GetVersion)
@@ -193,9 +190,10 @@ object Env {
     proxyGame = lila.round.Env.current.proxy.game _,
     flood = lila.security.Env.current.flood,
     hub = lila.hub.Env.current,
+    chatApi = lila.chat.Env.current.api,
     tellRound = lila.round.Env.current.tellRound,
     lightUserApi = lila.user.Env.current.lightUserApi,
-    isOnline = lila.user.Env.current.isOnline,
+    isOnline = lila.socket.Env.current.isOnline,
     onStart = lila.round.Env.current.onStart,
     historyApi = lila.history.Env.current.api,
     trophyApi = lila.user.Env.current.trophyApi,

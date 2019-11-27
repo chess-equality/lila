@@ -8,7 +8,7 @@ import play.api.libs.json._
 import scala.concurrent.duration._
 import scala.concurrent.Promise
 
-import lila.common.{ Debouncer, LightUser, MaxPerSecond }
+import lila.common.{ Bus, Debouncer, LightUser, MaxPerSecond }
 import lila.game.{ Game, LightGame, GameRepo, Pov, LightPov }
 import lila.hub.actorApi.lobby.ReloadTournaments
 import lila.hub.actorApi.map.Tell
@@ -16,7 +16,7 @@ import lila.hub.actorApi.timeline.{ Propagate, TourJoin }
 import lila.hub.lightTeam._
 import lila.hub.{ Duct, DuctMap }
 import lila.round.actorApi.round.{ GoBerserk, AbortForce }
-import lila.socket.actorApi.SendToFlag
+import lila.socket.Socket.SendToFlag
 import lila.user.{ User, UserRepo }
 import makeTimeout.short
 
@@ -42,8 +42,6 @@ final class TournamentApi(
     lightUserApi: lila.user.LightUserApi,
     proxyGame: Game.ID => Fu[Option[Game]]
 ) {
-
-  private val bus = system.lilaBus
 
   def createTournament(
     setup: TournamentSetup,
@@ -71,7 +69,7 @@ final class TournamentApi(
         }
       }
     if (tour.name != me.titleUsername && lila.common.LameName.anyNameButLichessIsOk(tour.name))
-      bus.publish(lila.hub.actorApi.slack.TournamentName(me.username, tour.id, tour.name), 'slack)
+      Bus.publish(lila.hub.actorApi.slack.TournamentName(me.username, tour.id, tour.name), 'slack)
     logger.info(s"Create $tour")
     TournamentRepo.insert(tour) >>- join(tour.id, me, tour.password, setup.teamBattleByTeam, getUserTeamIds, none) inject tour
   }
@@ -533,14 +531,14 @@ final class TournamentApi(
     private val debouncer = system.actorOf(Props(new Debouncer(15 seconds, {
       (_: Debouncer.Nothing) =>
         fetchVisibleTournaments flatMap apiJsonView.apply foreach { json =>
-          bus.publish(
+          Bus.publish(
             SendToFlag("tournament", Json.obj("t" -> "reload", "d" -> json)),
             'sendToFlag
           )
         }
         TournamentRepo.promotable foreach { tours =>
           renderer ? Tournament.TournamentTable(tours) map {
-            case view: String => bus.publish(ReloadTournaments(view), 'lobbySocket)
+            case view: String => Bus.publish(ReloadTournaments(view), 'lobbySocket)
           }
         }
     })))
@@ -560,11 +558,7 @@ final class TournamentApi(
     private def publishNow(tourId: Tournament.ID) = tournamentTop(tourId) map { top =>
       val lastHash: Int = ~lastPublished.getIfPresent(tourId)
       if (lastHash != top.hashCode) {
-        bus.publish(
-          lila.hub.actorApi.round.TourStandingOld(JsonView.top(top, lightUserApi.sync)),
-          Symbol(s"tour-standing-$tourId")
-        ) // old TODO remove
-        bus.publish(
+        Bus.publish(
           lila.hub.actorApi.round.TourStanding(tourId, JsonView.top(top, lightUserApi.sync)),
           'tourStanding
         )
